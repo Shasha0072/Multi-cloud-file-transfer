@@ -312,13 +312,15 @@ class Database {
   // Create session for JWT management
   async createSession(userId, sessionToken, providerType, deviceInfo = {}) {
     return new Promise((resolve, reject) => {
-      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+      const expiresAt = new Date(
+        Date.now() + 7 * 24 * 60 * 60 * 1000
+      ).toISOString();
 
       const stmt = this.db.prepare(`
-        INSERT INTO user_sessions 
-        (user_id, session_token, provider_type, device_info, ip_address, user_agent, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
+      INSERT INTO user_sessions 
+      (user_id, session_token, provider_type, device_info, ip_address, user_agent, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
 
       stmt.run(
         [
@@ -346,18 +348,29 @@ class Database {
   // Validate session token
   async validateSession(sessionToken) {
     return new Promise((resolve, reject) => {
-      const query = `
-        SELECT s.*, u.id as user_id, u.email, u.first_name, u.last_name, u.is_active
-        FROM user_sessions s
-        JOIN users u ON s.user_id = u.id
-        WHERE s.session_token = ? AND s.is_active = 1 AND s.expires_at > datetime('now')
-      `;
+      const checkQuery = `
+      SELECT s.*, u.id as user_id, u.email, u.first_name, u.last_name, u.is_active
+      FROM user_sessions s
+      JOIN users u ON s.user_id = u.id
+      WHERE s.session_token = ?
+    `;
 
-      this.db.get(query, [sessionToken], (err, row) => {
+      this.db.get(checkQuery, [sessionToken], (err, row) => {
         if (err) {
           reject(err);
+        } else if (!row) {
+          resolve(null);
         } else {
-          resolve(row);
+          // Check if session is active and not expired
+          const now = new Date();
+          const expiresAt = new Date(row.expires_at);
+          const isNotExpired = expiresAt > now;
+
+          if (row.is_active == 1 && isNotExpired) {
+            resolve(row);
+          } else {
+            resolve(null);
+          }
         }
       });
     });
@@ -467,60 +480,6 @@ class Database {
     `;
 
       this.db.get(query, [providerType, identifier, identifier], (err, row) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row);
-        }
-      });
-    });
-  }
-
-  // Create session for JWT management
-  async createSession(userId, sessionToken, providerType, deviceInfo = {}) {
-    return new Promise((resolve, reject) => {
-      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
-
-      const stmt = this.db.prepare(`
-      INSERT INTO user_sessions 
-      (user_id, session_token, provider_type, device_info, ip_address, user_agent, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-      stmt.run(
-        [
-          userId,
-          sessionToken,
-          providerType,
-          JSON.stringify(deviceInfo),
-          deviceInfo.ip,
-          deviceInfo.userAgent,
-          expiresAt,
-        ],
-        function (err) {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(this.lastID);
-          }
-        }
-      );
-
-      stmt.finalize();
-    });
-  }
-
-  // Update validateSession method (replace the existing simple one)
-  async validateSession(sessionToken) {
-    return new Promise((resolve, reject) => {
-      const query = `
-      SELECT s.*, u.id as user_id, u.email, u.first_name, u.last_name, u.is_active
-      FROM user_sessions s
-      JOIN users u ON s.user_id = u.id
-      WHERE s.session_token = ? AND s.is_active = 1 AND s.expires_at > datetime('now')
-    `;
-
-      this.db.get(query, [sessionToken], (err, row) => {
         if (err) {
           reject(err);
         } else {
