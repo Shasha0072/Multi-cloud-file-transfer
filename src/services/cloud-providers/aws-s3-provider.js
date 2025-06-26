@@ -228,27 +228,14 @@ class AWSS3Provider {
         Key: filePath,
       };
 
-      // Get file info first for progress tracking
+      // Get the S3 object
+      const s3Object = this.s3.getObject(params);
+
+      // Create the stream
+      const stream = s3Object.createReadStream();
+
+      // Get file info for metadata
       const fileInfo = await this.getFileInfo(filePath);
-
-      const request = this.s3.getObject(params);
-      const stream = request.createReadStream();
-
-      let downloadedBytes = 0;
-
-      if (options.onProgress) {
-        stream.on("data", (chunk) => {
-          downloadedBytes += chunk.length;
-          const percentage = Math.round(
-            (downloadedBytes / fileInfo.file.size) * 100
-          );
-          options.onProgress({
-            loaded: downloadedBytes,
-            total: fileInfo.file.size,
-            percentage: percentage,
-          });
-        });
-      }
 
       return {
         success: true,

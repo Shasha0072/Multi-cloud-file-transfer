@@ -716,6 +716,203 @@ async function accountRoutes(fastify, options) {
       }
     }
   );
+
+  // Upload file to cloud account
+  fastify.post(
+    "/:id/files/upload",
+    {
+      preHandler: [fastify.authenticate],
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Only support AWS S3 for now
+        if (account.provider !== "aws-s3") {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "File upload is currently only supported for AWS S3 accounts.",
+          });
+        }
+
+        // Handle file upload (multipart/form-data)
+        const data = await request.file();
+
+        if (!data) {
+          return reply.code(400).send({
+            error: "No file provided",
+            message: "Please select a file to upload.",
+          });
+        }
+
+        // Get file buffer
+        const fileBuffer = await data.toBuffer();
+        const filename = data.filename;
+        const mimetype = data.mimetype;
+
+        // Get destination path from query or use filename
+        const destinationPath = request.query.path
+          ? `${request.query.path}/${filename}`
+          : filename;
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+        const s3Provider = new AWSS3Provider(credentials);
+
+        // Upload file with progress tracking
+        const result = await s3Provider.uploadFile(
+          fileBuffer,
+          destinationPath,
+          {
+            contentType: mimetype,
+            onProgress: (progress) => {
+              // For now, just log progress. Later we can add WebSocket for real-time updates
+              console.log(`Upload progress: ${progress.percentage}%`);
+            },
+          }
+        );
+
+        reply.send({
+          success: true,
+          message: "File uploaded successfully",
+          account: {
+            id: account.id,
+            name: account.account_name,
+            provider: account.provider,
+          },
+          file: {
+            name: filename,
+            path: destinationPath,
+            size: fileBuffer.length,
+            contentType: mimetype,
+            etag: result.file.etag,
+            location: result.file.location,
+          },
+        });
+      } catch (error) {
+        fastify.log.error("Error uploading file:", error);
+        reply.code(500).send({
+          error: "Upload failed",
+          message: error.message || "Unable to upload file to cloud account.",
+        });
+      }
+    }
+  );
+
+  // Download file from cloud account
+  fastify.get(
+    "/:id/files/download",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", pattern: "^[0-9]+$" },
+          },
+        },
+        querystring: {
+          type: "object",
+          required: ["filePath"],
+          properties: {
+            filePath: { type: "string", minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+        const { filePath } = request.query;
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Only support AWS S3 for now
+        if (account.provider !== "aws-s3") {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "File download is currently only supported for AWS S3 accounts.",
+          });
+        }
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+        const s3Provider = new AWSS3Provider(credentials);
+
+        // Get file info first
+        const fileInfo = await s3Provider.getFileInfo(filePath);
+
+        // Create S3 download parameters directly
+        const params = {
+          Bucket: credentials.bucketName,
+          Key: filePath,
+        };
+
+        // Get the S3 object directly
+        const s3Object = s3Provider.s3.getObject(params);
+
+        // Set proper headers for download
+        const filename = filePath.split("/").pop();
+        reply.header(
+          "Content-Disposition",
+          `attachment; filename="${filename}"`
+        );
+        reply.header(
+          "Content-Type",
+          fileInfo.file.contentType || "application/octet-stream"
+        );
+        reply.header("Content-Length", fileInfo.file.size);
+
+        // Send the S3 stream directly
+        return reply.send(s3Object.createReadStream());
+      } catch (error) {
+        fastify.log.error("Error downloading file:", error);
+
+        if (error.message.includes("not found")) {
+          return reply.code(404).send({
+            error: "File not found",
+            message: error.message,
+          });
+        }
+
+        reply.code(500).send({
+          error: "Download failed",
+          message:
+            error.message || "Unable to download file from cloud account.",
+        });
+      }
+    }
+  );
 }
 
 module.exports = accountRoutes;

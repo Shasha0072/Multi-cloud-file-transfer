@@ -19,6 +19,13 @@ fastify.register(require("@fastify/jwt"), {
     process.env.JWT_SECRET || "your-development-secret-change-in-production",
 });
 
+fastify.register(require("@fastify/multipart"), {
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB limit
+    files: 1, // Only one file at a time
+  },
+});
+
 // Add database to fastify instance
 fastify.decorate("db", database);
 
