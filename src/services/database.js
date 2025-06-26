@@ -562,6 +562,201 @@ class Database {
     });
   }
 
+  // Cloud Account Management Methods
+
+  // Create cloud account
+  async createCloudAccount(
+    userId,
+    provider,
+    accountName,
+    encryptedCredentials
+  ) {
+    return new Promise((resolve, reject) => {
+      const stmt = this.db.prepare(`
+      INSERT INTO cloud_accounts (user_id, provider, account_name, encrypted_credentials)
+      VALUES (?, ?, ?, ?)
+    `);
+
+      stmt.run(
+        [userId, provider, accountName, encryptedCredentials],
+        function (err) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(this.lastID);
+          }
+        }
+      );
+
+      stmt.finalize();
+    });
+  }
+
+  // Get cloud accounts by user
+  async getCloudAccountsByUser(userId) {
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        `SELECT id, provider, account_name, connection_status, last_sync, 
+              error_message, created_at 
+       FROM cloud_accounts 
+       WHERE user_id = ? 
+       ORDER BY created_at DESC`,
+        [userId],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  }
+
+  // Get specific cloud account by ID (with credentials)
+  async getCloudAccountById(accountId, userId) {
+    return new Promise((resolve, reject) => {
+      this.db.get(
+        `SELECT * FROM cloud_accounts 
+       WHERE id = ? AND user_id = ?`,
+        [accountId, userId],
+        (err, row) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(row);
+          }
+        }
+      );
+    });
+  }
+
+  // Update cloud account
+  async updateCloudAccount(accountId, userId, updates) {
+    return new Promise((resolve, reject) => {
+      const allowedFields = [
+        "account_name",
+        "encrypted_credentials",
+        "connection_status",
+        "last_sync",
+        "error_message",
+      ];
+
+      const updateFields = [];
+      const values = [];
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (allowedFields.includes(key)) {
+          updateFields.push(`${key} = ?`);
+          values.push(value);
+        }
+      }
+
+      if (updateFields.length === 0) {
+        return resolve(false);
+      }
+
+      values.push(accountId, userId);
+
+      const stmt = this.db.prepare(`
+      UPDATE cloud_accounts 
+      SET ${updateFields.join(", ")} 
+      WHERE id = ? AND user_id = ?
+    `);
+
+      stmt.run(values, function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.changes > 0);
+        }
+      });
+
+      stmt.finalize();
+    });
+  }
+
+  // Delete cloud account
+  async deleteCloudAccount(accountId, userId) {
+    return new Promise((resolve, reject) => {
+      const stmt = this.db.prepare(`
+      DELETE FROM cloud_accounts 
+      WHERE id = ? AND user_id = ?
+    `);
+
+      stmt.run([accountId, userId], function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.changes > 0);
+        }
+      });
+
+      stmt.finalize();
+    });
+  }
+
+  // Check if account name exists for user (to prevent duplicates)
+  async checkAccountNameExists(userId, accountName, excludeId = null) {
+    return new Promise((resolve, reject) => {
+      let query =
+        "SELECT id FROM cloud_accounts WHERE user_id = ? AND account_name = ?";
+      const params = [userId, accountName];
+
+      if (excludeId) {
+        query += " AND id != ?";
+        params.push(excludeId);
+      }
+
+      this.db.get(query, params, (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(!!row);
+        }
+      });
+    });
+  }
+
+  // Get account statistics for user
+  async getAccountStats(userId) {
+    return new Promise((resolve, reject) => {
+      const query = `
+      SELECT 
+        COUNT(*) as total_accounts,
+        SUM(CASE WHEN connection_status = 'active' THEN 1 ELSE 0 END) as active_accounts,
+        SUM(CASE WHEN connection_status = 'error' THEN 1 ELSE 0 END) as error_accounts,
+        provider,
+        COUNT(*) as count
+      FROM cloud_accounts 
+      WHERE user_id = ? 
+      GROUP BY provider
+    `;
+
+      this.db.all(query, [userId], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          // Also get total counts
+          this.db.get(
+            "SELECT COUNT(*) as total FROM cloud_accounts WHERE user_id = ?",
+            [userId],
+            (err2, totalRow) => {
+              if (err2) {
+                reject(err2);
+              } else {
+                resolve({
+                  total: totalRow.total,
+                  byProvider: rows,
+                });
+              }
+            }
+          );
+        }
+      });
+    });
+  }
+
   // Close database connection
   close() {
     if (this.db) {

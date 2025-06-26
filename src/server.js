@@ -138,7 +138,7 @@ fastify.get("/api/db-test", async (request, reply) => {
 
 // Register route modules (we'll create these next)
 fastify.register(require("./routes/auth"), { prefix: "/api/auth" });
-// fastify.register(require('./routes/accounts'), { prefix: '/api/accounts' });
+fastify.register(require("./routes/accounts"), { prefix: "/api/accounts" });
 // fastify.register(require('./routes/transfers'), { prefix: '/api/transfers' });
 
 // Graceful shutdown handler
