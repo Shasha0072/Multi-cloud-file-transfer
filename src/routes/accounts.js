@@ -1,6 +1,7 @@
 // src/routes/accounts.js - Cloud Account Management Routes
 const encryptionService = require("../services/encryption");
 const AWSS3Provider = require("../services/cloud-providers/aws-s3-provider");
+const GoogleDriveProvider = require("../services/cloud-providers/google-drive-provider");
 async function accountRoutes(fastify, options) {
   // Input validation schemas
   const createAccountSchema = {
@@ -471,17 +472,22 @@ async function accountRoutes(fastify, options) {
               break;
 
             case "google-drive":
-              // TODO: Implement Google Drive testing
+              const driveProvider = new GoogleDriveProvider(credentials);
+              const driveAuthResult = await driveProvider.authenticate();
+
               testResult = {
-                success: false,
+                success: true,
                 provider: account.provider,
                 accountName: account.account_name,
-                connectionStatus: "error",
+                connectionStatus: "active",
                 testedAt: new Date().toISOString(),
-                message: "Google Drive integration not implemented yet",
+                message: driveAuthResult.message,
+                details: {
+                  user: driveAuthResult.user,
+                  storage: driveAuthResult.storage,
+                },
               };
-              connectionStatus = "error";
-              errorMessage = "Google Drive integration not implemented yet";
+              connectionStatus = "active";
               break;
 
             case "azure-blob":
@@ -592,12 +598,12 @@ async function accountRoutes(fastify, options) {
           });
         }
 
-        // Only support AWS S3 for now
-        if (account.provider !== "aws-s3") {
+        // Only support AWS S3 and Google Drive
+        if (!["aws-s3", "google-drive"].includes(account.provider)) {
           return reply.code(400).send({
             error: "Provider not supported",
             message:
-              "File operations are currently only supported for AWS S3 accounts.",
+              "File operations are currently supported for AWS S3 and Google Drive accounts.",
           });
         }
 
@@ -605,10 +611,17 @@ async function accountRoutes(fastify, options) {
         const credentials = encryptionService.decryptCredentials(
           account.encrypted_credentials
         );
-        const s3Provider = new AWSS3Provider(credentials);
 
-        // List files
-        const result = await s3Provider.listFiles(path, { limit });
+        let provider;
+        let result;
+
+        if (account.provider === "aws-s3") {
+          provider = new AWSS3Provider(credentials);
+          result = await provider.listFiles(path, { limit });
+        } else if (account.provider === "google-drive") {
+          provider = new GoogleDriveProvider(credentials);
+          result = await provider.listFiles(path || "root", { limit });
+        }
 
         reply.send({
           success: true,
@@ -718,6 +731,7 @@ async function accountRoutes(fastify, options) {
   );
 
   // Upload file to cloud account
+  // Replace the entire upload endpoint in src/routes/accounts.js with this:
   fastify.post(
     "/:id/files/upload",
     {
@@ -740,12 +754,12 @@ async function accountRoutes(fastify, options) {
           });
         }
 
-        // Only support AWS S3 for now
-        if (account.provider !== "aws-s3") {
+        // Support both AWS S3 and Google Drive
+        if (!["aws-s3", "google-drive"].includes(account.provider)) {
           return reply.code(400).send({
             error: "Provider not supported",
             message:
-              "File upload is currently only supported for AWS S3 accounts.",
+              "File upload is currently supported for AWS S3 and Google Drive accounts.",
           });
         }
 
@@ -764,47 +778,86 @@ async function accountRoutes(fastify, options) {
         const filename = data.filename;
         const mimetype = data.mimetype;
 
-        // Get destination path from query or use filename
-        const destinationPath = request.query.path
-          ? `${request.query.path}/${filename}`
-          : filename;
-
-        // Decrypt credentials and create provider
+        // Decrypt credentials
         const credentials = encryptionService.decryptCredentials(
           account.encrypted_credentials
         );
-        const s3Provider = new AWSS3Provider(credentials);
 
-        // Upload file with progress tracking
-        const result = await s3Provider.uploadFile(
-          fileBuffer,
-          destinationPath,
-          {
+        let result;
+        let responseData;
+
+        if (account.provider === "aws-s3") {
+          // AWS S3 Upload
+          const destinationPath = request.query.path
+            ? `${request.query.path}/${filename}`
+            : filename;
+
+          const s3Provider = new AWSS3Provider(credentials);
+          result = await s3Provider.uploadFile(fileBuffer, destinationPath, {
             contentType: mimetype,
             onProgress: (progress) => {
-              // For now, just log progress. Later we can add WebSocket for real-time updates
-              console.log(`Upload progress: ${progress.percentage}%`);
+              console.log(`S3 Upload progress: ${progress.percentage}%`);
             },
-          }
-        );
+          });
 
-        reply.send({
-          success: true,
-          message: "File uploaded successfully",
-          account: {
-            id: account.id,
-            name: account.account_name,
-            provider: account.provider,
-          },
-          file: {
-            name: filename,
-            path: destinationPath,
-            size: fileBuffer.length,
+          responseData = {
+            success: true,
+            message: "File uploaded successfully to AWS S3",
+            account: {
+              id: account.id,
+              name: account.account_name,
+              provider: account.provider,
+            },
+            file: {
+              name: filename,
+              path: destinationPath,
+              size: fileBuffer.length,
+              contentType: mimetype,
+              etag: result.file.etag,
+              location: result.file.location,
+            },
+          };
+        } else if (account.provider === "google-drive") {
+          // Google Drive Upload
+          const driveProvider = new GoogleDriveProvider(credentials);
+
+          // For Google Drive, we can optionally specify a parent folder
+          const uploadOptions = {
             contentType: mimetype,
-            etag: result.file.etag,
-            location: result.file.location,
-          },
-        });
+          };
+
+          // If path is specified, try to find/create folder
+          if (request.query.path) {
+            // For now, upload to root. Later we can implement folder creation
+            console.log(`Google Drive upload to folder: ${request.query.path}`);
+          }
+
+          result = await driveProvider.uploadFile(
+            fileBuffer,
+            filename,
+            uploadOptions
+          );
+
+          responseData = {
+            success: true,
+            message: "File uploaded successfully to Google Drive",
+            account: {
+              id: account.id,
+              name: account.account_name,
+              provider: account.provider,
+            },
+            file: {
+              id: result.file.id,
+              name: filename,
+              size: fileBuffer.length,
+              contentType: mimetype,
+              webViewLink: result.file.webViewLink,
+              driveFileId: result.file.id,
+            },
+          };
+        }
+
+        reply.send(responseData);
       } catch (error) {
         fastify.log.error("Error uploading file:", error);
         reply.code(500).send({

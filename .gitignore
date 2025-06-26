@@ -46,3 +46,5 @@ Desktop.ini
 # Temporary files
 tmp/
 temp/
+google-credentials/clinet-secret.json
+google-credentials/service-account-key.json

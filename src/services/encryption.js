@@ -57,7 +57,7 @@ class EncryptionService {
   validateCredentialStructure(provider, credentials) {
     const requiredFields = {
       "aws-s3": ["accessKeyId", "secretAccessKey", "region", "bucketName"],
-      "google-drive": ["clientId", "clientSecret", "refreshToken"],
+      "google-drive": ["serviceAccountKey"], // Only needs service account JSON
       "azure-blob": ["connectionString", "containerName"],
       dropbox: ["accessToken"],
     };
