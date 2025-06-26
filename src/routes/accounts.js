@@ -1,6 +1,6 @@
 // src/routes/accounts.js - Cloud Account Management Routes
 const encryptionService = require("../services/encryption");
-
+const AWSS3Provider = require("../services/cloud-providers/aws-s3-provider");
 async function accountRoutes(fastify, options) {
   // Input validation schemas
   const createAccountSchema = {
@@ -439,31 +439,279 @@ async function accountRoutes(fastify, options) {
           });
         }
 
-        // For now, return a mock successful test
-        // In the next step, we'll implement actual connection testing
-        const testResult = {
-          success: true,
-          provider: account.provider,
-          accountName: account.account_name,
-          connectionStatus: "active",
-          testedAt: new Date().toISOString(),
-          message: "Connection test successful",
-        };
+        // Decrypt credentials
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
 
-        // Update last sync time
+        let testResult;
+        let connectionStatus = "error";
+        let errorMessage = null;
+
+        try {
+          // Test connection based on provider type
+          switch (account.provider) {
+            case "aws-s3":
+              const s3Provider = new AWSS3Provider(credentials);
+              const authResult = await s3Provider.authenticate();
+
+              testResult = {
+                success: true,
+                provider: account.provider,
+                accountName: account.account_name,
+                connectionStatus: "active",
+                testedAt: new Date().toISOString(),
+                message: authResult.message,
+                details: {
+                  bucket: authResult.bucket,
+                  region: authResult.region,
+                },
+              };
+              connectionStatus = "active";
+              break;
+
+            case "google-drive":
+              // TODO: Implement Google Drive testing
+              testResult = {
+                success: false,
+                provider: account.provider,
+                accountName: account.account_name,
+                connectionStatus: "error",
+                testedAt: new Date().toISOString(),
+                message: "Google Drive integration not implemented yet",
+              };
+              connectionStatus = "error";
+              errorMessage = "Google Drive integration not implemented yet";
+              break;
+
+            case "azure-blob":
+              // TODO: Implement Azure Blob testing
+              testResult = {
+                success: false,
+                provider: account.provider,
+                accountName: account.account_name,
+                connectionStatus: "error",
+                testedAt: new Date().toISOString(),
+                message: "Azure Blob integration not implemented yet",
+              };
+              connectionStatus = "error";
+              errorMessage = "Azure Blob integration not implemented yet";
+              break;
+
+            case "dropbox":
+              // TODO: Implement Dropbox testing
+              testResult = {
+                success: false,
+                provider: account.provider,
+                accountName: account.account_name,
+                connectionStatus: "error",
+                testedAt: new Date().toISOString(),
+                message: "Dropbox integration not implemented yet",
+              };
+              connectionStatus = "error";
+              errorMessage = "Dropbox integration not implemented yet";
+              break;
+
+            default:
+              throw new Error(`Unsupported provider: ${account.provider}`);
+          }
+        } catch (connectionError) {
+          // Connection test failed
+          testResult = {
+            success: false,
+            provider: account.provider,
+            accountName: account.account_name,
+            connectionStatus: "error",
+            testedAt: new Date().toISOString(),
+            message: connectionError.message,
+            error: connectionError.message,
+          };
+          connectionStatus = "error";
+          errorMessage = connectionError.message;
+        }
+
+        // Update connection status in database
         await fastify.db.updateCloudAccount(accountId, request.user.id, {
-          connection_status: "active",
+          connection_status: connectionStatus,
           last_sync: new Date().toISOString(),
-          error_message: null,
+          error_message: errorMessage,
         });
 
-        reply.send(testResult);
+        // Return appropriate response based on success/failure
+        if (testResult.success) {
+          reply.send(testResult);
+        } else {
+          reply.code(400).send(testResult);
+        }
       } catch (error) {
         fastify.log.error("Error testing cloud account:", error);
         reply.code(500).send({
           error: "Test failed",
           message:
             "Unable to test cloud account connection. Please try again later.",
+        });
+      }
+    }
+  );
+
+  fastify.get(
+    "/:id/files",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", pattern: "^[0-9]+$" },
+          },
+        },
+        querystring: {
+          type: "object",
+          properties: {
+            path: { type: "string", default: "" },
+            limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+        const { path = "", limit = 100 } = request.query;
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Only support AWS S3 for now
+        if (account.provider !== "aws-s3") {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "File operations are currently only supported for AWS S3 accounts.",
+          });
+        }
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+        const s3Provider = new AWSS3Provider(credentials);
+
+        // List files
+        const result = await s3Provider.listFiles(path, { limit });
+
+        reply.send({
+          success: true,
+          account: {
+            id: account.id,
+            name: account.account_name,
+            provider: account.provider,
+          },
+          path: path,
+          files: result.files,
+          hasMore: result.hasMore,
+          totalCount: result.totalCount,
+        });
+      } catch (error) {
+        fastify.log.error("Error listing files:", error);
+        reply.code(500).send({
+          error: "Failed to list files",
+          message:
+            error.message || "Unable to retrieve files from cloud account.",
+        });
+      }
+    }
+  );
+
+  // Get file information
+  fastify.get(
+    "/:id/files/info",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", pattern: "^[0-9]+$" },
+          },
+        },
+        querystring: {
+          type: "object",
+          required: ["filePath"],
+          properties: {
+            filePath: { type: "string", minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+        const { filePath } = request.query;
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Only support AWS S3 for now
+        if (account.provider !== "aws-s3") {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "File operations are currently only supported for AWS S3 accounts.",
+          });
+        }
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+        const s3Provider = new AWSS3Provider(credentials);
+
+        // Get file info
+        const result = await s3Provider.getFileInfo(filePath);
+
+        reply.send({
+          success: true,
+          account: {
+            id: account.id,
+            name: account.account_name,
+            provider: account.provider,
+          },
+          file: result.file,
+        });
+      } catch (error) {
+        fastify.log.error("Error getting file info:", error);
+
+        if (error.message.includes("not found")) {
+          return reply.code(404).send({
+            error: "File not found",
+            message: error.message,
+          });
+        }
+
+        reply.code(500).send({
+          error: "Failed to get file info",
+          message: error.message || "Unable to retrieve file information.",
         });
       }
     }
