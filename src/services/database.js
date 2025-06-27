@@ -757,6 +757,154 @@ class Database {
     });
   }
 
+  // Transfer Management Methods
+
+  // Create transfer job
+  async createTransferJob(transferData) {
+    return new Promise((resolve, reject) => {
+      const {
+        userId,
+        sourceAccountId,
+        destinationAccountId,
+        sourceFilePath,
+        destinationFilePath,
+        fileName,
+        fileSize = 0
+      } = transferData;
+
+      const stmt = this.db.prepare(`
+        INSERT INTO transfers 
+        (user_id, source_account_id, destination_account_id, source_path, 
+         destination_path, file_name, file_size)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        [userId, sourceAccountId, destinationAccountId, sourceFilePath, 
+         destinationFilePath, fileName, fileSize],
+        function (err) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(this.lastID);
+          }
+        }
+      );
+
+      stmt.finalize();
+    });
+  }
+
+  // Get transfer by ID
+  async getTransferById(transferId, userId) {
+    return new Promise((resolve, reject) => {
+      this.db.get(
+        `SELECT * FROM transfers 
+         WHERE id = ? AND user_id = ?`,
+        [transferId, userId],
+        (err, row) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(row);
+          }
+        }
+      );
+    });
+  }
+
+  // Get transfers by user
+  async getTransfersByUser(userId, limit = 50, offset = 0) {
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        `SELECT t.*, 
+                sa.account_name as source_account_name, sa.provider as source_provider,
+                da.account_name as dest_account_name, da.provider as dest_provider
+         FROM transfers t
+         LEFT JOIN cloud_accounts sa ON t.source_account_id = sa.id
+         LEFT JOIN cloud_accounts da ON t.destination_account_id = da.id
+         WHERE t.user_id = ?
+         ORDER BY t.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [userId, limit, offset],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  }
+
+  // Update transfer job
+  async updateTransferJob(transferId, updates) {
+    return new Promise((resolve, reject) => {
+      const allowedFields = [
+        'status', 'progress', 'transferred_bytes', 'transfer_speed',
+        'error_message', 'retry_count', 'started_at', 'completed_at'
+      ];
+
+      const updateFields = [];
+      const values = [];
+
+      for (const [key, value] of Object.entries(updates)) {
+        if (allowedFields.includes(key)) {
+          updateFields.push(`${key} = ?`);
+          values.push(value);
+        }
+      }
+
+      if (updateFields.length === 0) {
+        return resolve(false);
+      }
+
+      values.push(transferId);
+
+      const stmt = this.db.prepare(`
+        UPDATE transfers 
+        SET ${updateFields.join(', ')} 
+        WHERE id = ?
+      `);
+
+      stmt.run(values, function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(this.changes > 0);
+        }
+      });
+
+      stmt.finalize();
+    });
+  }
+
+  // Get transfer statistics
+  async getTransferStats(userId) {
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT 
+          COUNT(*) as total_transfers,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+          SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
+          SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) as queued,
+          SUM(file_size) as total_bytes_transferred
+        FROM transfers 
+        WHERE user_id = ?
+      `;
+
+      this.db.get(query, [userId], (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row);
+        }
+      });
+    });
+  }
+
   // Close database connection
   close() {
     if (this.db) {

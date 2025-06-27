@@ -218,7 +218,7 @@ class GoogleDriveProvider {
       const response = await this.drive.files.get({
         fileId: fileId,
         fields:
-          "id, name, size, mimeType, modifiedTime, createdTime, parents, webViewLink, downloadLink, exportLinks",
+          "id, name, size, mimeType, modifiedTime, createdTime, parents, webViewLink, exportLinks",
       });
 
       const file = response.data;
