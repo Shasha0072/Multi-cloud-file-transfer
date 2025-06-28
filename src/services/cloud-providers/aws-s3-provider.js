@@ -309,6 +309,41 @@ class AWSS3Provider {
     }
   }
 
+  // Rename file (copy to new location and delete original)
+  async renameFile(oldPath, newPath) {
+    try {
+      if (!this.authenticated) {
+        await this.authenticate();
+      }
+
+      // First, copy the object to the new location
+      const copyParams = {
+        Bucket: this.credentials.bucketName,
+        CopySource: `${this.credentials.bucketName}/${oldPath}`,
+        Key: newPath,
+      };
+
+      await this.s3.copyObject(copyParams).promise();
+
+      // Then delete the original object
+      const deleteParams = {
+        Bucket: this.credentials.bucketName,
+        Key: oldPath,
+      };
+
+      await this.s3.deleteObject(deleteParams).promise();
+
+      return {
+        success: true,
+        message: `File renamed from '${oldPath}' to '${newPath}'`,
+        oldPath: oldPath,
+        newPath: newPath,
+      };
+    } catch (error) {
+      throw new Error(`Rename failed: ${error.message}`);
+    }
+  }
+
   // Get connection status
   getStatus() {
     return {

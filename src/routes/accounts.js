@@ -966,6 +966,277 @@ async function accountRoutes(fastify, options) {
       }
     }
   );
+
+  // Create folder in cloud account
+  fastify.post(
+    "/:id/folders",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", pattern: "^[0-9]+$" },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["name"],
+          properties: {
+            path: { type: "string", default: "" },
+            name: { type: "string", minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+        const { path = "", name } = request.body;
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Only support AWS S3 for now (Google Drive has different folder concepts)
+        if (account.provider !== "aws-s3") {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "Folder creation is currently only supported for AWS S3 accounts.",
+          });
+        }
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+        const s3Provider = new AWSS3Provider(credentials);
+
+        // Create folder path (S3 folders are just keys ending with /)
+        const folderPath = path ? `${path}/${name}/` : `${name}/`;
+
+        // Create empty object to represent folder
+        const result = await s3Provider.createFolder(folderPath);
+
+        reply.send({
+          success: true,
+          message: "Folder created successfully",
+          folder: {
+            name: name,
+            path: folderPath,
+            created: new Date().toISOString(),
+          },
+        });
+      } catch (error) {
+        fastify.log.error("Error creating folder:", error);
+        reply.code(500).send({
+          error: "Failed to create folder",
+          message: error.message || "Unable to create folder in cloud account.",
+        });
+      }
+    }
+  );
+
+  // Rename file/folder in cloud account
+  fastify.put(
+    "/:id/files/rename",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", pattern: "^[0-9]+$" },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["oldPath", "newName"],
+          properties: {
+            oldPath: { type: "string", minLength: 1 },
+            newName: { type: "string", minLength: 1 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+        const { oldPath, newName } = request.body;
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Only support AWS S3 for now
+        if (account.provider !== "aws-s3") {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "File rename is currently only supported for AWS S3 accounts.",
+          });
+        }
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+        const s3Provider = new AWSS3Provider(credentials);
+
+        // Create new path by replacing the filename
+        const pathParts = oldPath.split('/');
+        pathParts[pathParts.length - 1] = newName;
+        const newPath = pathParts.join('/');
+
+        // Rename file (copy and delete)
+        const result = await s3Provider.renameFile(oldPath, newPath);
+
+        reply.send({
+          success: true,
+          message: "File renamed successfully",
+          file: {
+            oldPath: oldPath,
+            newPath: newPath,
+            newName: newName,
+            renamed: new Date().toISOString(),
+          },
+        });
+      } catch (error) {
+        fastify.log.error("Error renaming file:", error);
+        reply.code(500).send({
+          error: "Failed to rename file",
+          message: error.message || "Unable to rename file in cloud account.",
+        });
+      }
+    }
+  );
+
+  // Delete files/folders from cloud account
+  fastify.delete(
+    "/:id/files",
+    {
+      preHandler: [fastify.authenticate],
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            id: { type: "string", pattern: "^[0-9]+$" },
+          },
+        },
+        body: {
+          type: "object",
+          required: ["paths"],
+          properties: {
+            paths: {
+              type: "array",
+              items: { type: "string", minLength: 1 },
+              minItems: 1,
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      try {
+        const accountId = parseInt(request.params.id);
+        const { paths } = request.body;
+
+        // Check if account exists and belongs to user
+        const account = await fastify.db.getCloudAccountById(
+          accountId,
+          request.user.id
+        );
+        if (!account) {
+          return reply.code(404).send({
+            error: "Account not found",
+            message:
+              "Cloud account not found or you do not have permission to access it.",
+          });
+        }
+
+        // Support both AWS S3 and Google Drive
+        if (!["aws-s3", "google-drive"].includes(account.provider)) {
+          return reply.code(400).send({
+            error: "Provider not supported",
+            message:
+              "File deletion is currently supported for AWS S3 and Google Drive accounts.",
+          });
+        }
+
+        // Decrypt credentials and create provider
+        const credentials = encryptionService.decryptCredentials(
+          account.encrypted_credentials
+        );
+
+        let result;
+        let deletedFiles = [];
+        let errors = [];
+
+        if (account.provider === "aws-s3") {
+          const s3Provider = new AWSS3Provider(credentials);
+          
+          // Delete each file
+          for (const filePath of paths) {
+            try {
+              await s3Provider.deleteFile(filePath);
+              deletedFiles.push(filePath);
+            } catch (error) {
+              errors.push({ path: filePath, error: error.message });
+            }
+          }
+        } else if (account.provider === "google-drive") {
+          const driveProvider = new GoogleDriveProvider(credentials);
+          
+          // Delete each file
+          for (const filePath of paths) {
+            try {
+              await driveProvider.deleteFile(filePath);
+              deletedFiles.push(filePath);
+            } catch (error) {
+              errors.push({ path: filePath, error: error.message });
+            }
+          }
+        }
+
+        reply.send({
+          success: true,
+          message: `Successfully deleted ${deletedFiles.length} file(s)`,
+          deleted: deletedFiles,
+          errors: errors,
+          summary: {
+            total: paths.length,
+            deleted: deletedFiles.length,
+            failed: errors.length,
+          },
+        });
+      } catch (error) {
+        fastify.log.error("Error deleting files:", error);
+        reply.code(500).send({
+          error: "Failed to delete files",
+          message: error.message || "Unable to delete files from cloud account.",
+        });
+      }
+    }
+  );
 }
 
 module.exports = accountRoutes;
